@@ -1,113 +1,93 @@
 # Aggregating Ethics Experimentation
 
-This repository is a small, local experiment for comparing how different moral aggregation methods select "best" AI advice.
+A small, local experiment comparing how different moral aggregation methods select "best" AI advice.
 
-The workflow is:
+The workflow:
 
 1. Generate multiple candidate answers to a moral dilemma.
 2. Score each answer under three ethical frameworks.
 3. Aggregate those framework scores with multiple decision rules.
 4. Visualize which response each rule picks.
 
-The project uses Ollama locally with `llama3.1:8b` for both generation and scoring.
+Generation uses Ollama locally with `llama3.1:8b`. Scoring uses OpenAI's `gpt-4o-mini`.
 
-## What is in this repo
+## Project layout
 
-- `generate_responses.py`  
-  Produces 16 sampled responses for a dilemma and saves them as JSON.
-- `format_responses.py`  
-  Normalizes response JSON so each response is stored as a wrapped list of lines.
-- `score_responses.py`  
-  Scores each response under utilitarian/deontological/Ubuntu lenses, computes aggregation winners, and writes an HTML table dashboard.
-- `responses_dilemma_1.json`  
-  Generated responses for the elder-care scenario.
-- `responses_dilemma_2.json`  
-  Generated responses for the friendship/possible-infidelity scenario.
-- `elder_care_dilemma_scores.html` and `friendship_dilemma_scores.html`  
-  Visualization outputs showing framework scores plus aggregation winners.
+```
+.
+├── generate_responses.py     # Stage 1: produce N candidate responses
+├── format_responses.py       # Optional helper to wrap response lines
+├── score_responses.py        # Stage 2: score + aggregate + visualise
+├── aggregation.py            # Aggregation rules (EC, Maximin, Nash, Baseline)
+├── data/
+│   ├── dilemmas.json         # Prompts used by Stage 1, keyed by id
+│   └── daily_dilemmas.json   # Reference corpus
+├── responses/                # Stage 1 output (one file per dilemma)
+├── scores/                   # Stage 2 output (.json + .html dashboard)
+├── templates/
+│   └── scores.html           # HTML template for the dashboard
+├── requirements.txt
+└── README.md
+```
 
-## Core idea
+## The four aggregation rules
 
-Each candidate response gets 3 scores (0-10):
+Each candidate response gets three judge scores (0-10):
 
-- Utilitarian (overall outcomes/well-being)
-- Deontological (duties/honesty/principles)
-- Ubuntu (community/relational harmony)
+- **Utilitarian** — overall outcomes / wellbeing
+- **Deontological** — duties, honesty, rights
+- **Ubuntu** — community, relational harmony
 
-Then four aggregation methods are compared:
+The four rules in `aggregation.py`:
 
-- **Expected choiceworthiness (EC)**: weighted sum (`0.4, 0.35, 0.25`)
-- **Maximin**: maximize the minimum framework score
-- **Nash parliament**: maximize product of scores
-- **Baseline**: utilitarian score only
+- **Expected choiceworthiness (EC)** — weighted sum (`0.4, 0.35, 0.25`)
+- **Maximin** — maximise the minimum framework score
+- **Nash parliament** — maximise the product of scores
+- **Baseline** — utilitarian score alone
 
 The experiment asks: do different aggregation rules select different responses?
 
-## Requirements
+## Setup
 
-- Python 3
-- Ollama running locally
-- Model pulled: `llama3.1:8b`
-- Python package: `requests`
-
-Install dependency:
+Requirements: Python 3, Ollama running locally with `llama3.1:8b` pulled, and an OpenAI API key.
 
 ```bash
-pip3 install requests
-```
-
-Prepare Ollama (if needed):
-
-```bash
+pip3 install -r requirements.txt
 ollama pull llama3.1:8b
 ollama serve
+export OPENAI_API_KEY="sk-..."
 ```
 
 ## How to run
 
-From the project root:
-
-1. Generate candidate responses:
+Add or edit dilemmas in `data/dilemmas.json`. Each entry has a `slug`, `title`, and `prompt`.
 
 ```bash
-python3 generate_responses.py
+python3 generate_responses.py 3                 # writes responses/grandmother.json
+python3 format_responses.py                     # optional: re-wrap response lines
+python3 score_responses.py grandmother          # writes scores/grandmother.{json,html}
 ```
 
-2. (Optional) Reformat JSON response line wrapping:
+`score_responses.py` accepts either a slug (e.g. `grandmother`) or a full path to a responses file.
 
-```bash
-python3 format_responses.py
-```
+Open `scores/<slug>.html` in your browser to inspect the winners by method.
 
-3. Score and produce visualization:
+## Output schema
 
-```bash
-python3 score_responses.py
-```
+`responses/<slug>.json`:
 
-Open the generated HTML file in your browser to inspect winners by method.
+- top-level metadata: `dilemma`, `slug`, `model`, `temperature`, `num_responses`
+- `responses`: list of `{ id, system_prompt, response }` where `response` is a list of wrapped lines
 
-## Important current behavior
+`scores/<slug>.json`:
 
-- `generate_responses.py` currently writes to `responses_dilemma_1.json` and currently calls `DILEMMA` (elder-care prompt) in the main loop.
-- `score_responses.py` currently reads `responses_dilemma_2.json` and writes `friendship_dilemma_scores.html`.
-
-If you want both scripts to operate on the same scenario in one run, update those constants first.
-
-## Output format notes
-
-The response JSON schema is:
-
-- top-level metadata: `dilemma`, `model`, `temperature`, `num_responses`
-- `responses`: array of objects with:
-  - `id` (1..N)
-  - `response` (list of wrapped text lines)
-
-`score_responses.py` tolerates either string or list-form responses.
+- `dilemma`, `slug`, `judge_model`, `weights`
+- `scores` — raw framework scores per response
+- `aggregated` — same rows with the four aggregation values added
+- `winners` — best id and value for each aggregation method
 
 ## Caveats
 
-- This is an experimental setup, not a normative ethics engine.
-- Scores are produced by the same model family, so judge-model bias is likely.
-- Randomness (`temperature`) means reruns can produce different response pools and different winners.
-
+- Experimental setup; not a normative ethics engine.
+- Scores are produced by an LLM, so judge-model bias is likely.
+- `temperature=1.0` means each generation run produces a different response pool.

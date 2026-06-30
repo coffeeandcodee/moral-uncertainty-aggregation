@@ -1,64 +1,36 @@
 """
-Aggregating Ethics - Stage 3: Generate candidate responses
+Aggregating Ethics — Stage 1: Generate candidate responses
 
-This script sends a moral dilemma to Llama 3.1 8B via Ollama 
-and collects 16 different responses using temperature sampling.
-Each response uses a different system prompt to encourage diverse perspectives.
+Sends a moral dilemma to Llama 3.1 8B via Ollama and collects diverse
+responses using temperature sampling and varied system prompts.
 
 Before running:
-1. Make sure Ollama is running (icon in your menu bar)
-2. Run: pip3 install requests (if you haven't already)
-3. Then: python3 generate_responses.py <dilemma_number>
+  1. Make sure Ollama is running (icon in your menu bar).
+  2. pip3 install -r requirements.txt
+  3. python3 generate_responses.py <dilemma_number>
 """
 
-import requests
+from __future__ import annotations
+
 import json
-import time
-import textwrap
 import sys
+import textwrap
+import time
+from pathlib import Path
+
+import requests
 
 # ── Settings ─────────────────────────────────────────────────
 MODEL = "llama3.1:8b"
 NUM_RESPONSES = 16
 TEMPERATURE = 1.0
 TOP_P = 0.95
+WRAP_WIDTH = 100
+OLLAMA_URL = "http://localhost:11434/api/generate"
 
-# ── The dilemmas ─────────────────────────────────────────────
-DILEMMA = """My elderly mother wants to keep living alone in her house, but she's 
-had two falls this year. My sister and I think she should move into a care home. 
-She's refusing. What should I do?
-
-Give a clear recommendation and explain your reasoning."""
-
-DILEMMA2 = """You see your best friend's spouse having an intimate dinner with someone else. 
-Telling your friend might destroy their marriage and your friendship, 
-but staying silent feels like betrayal.
-
-Give a clear recommendation and explain your reasoning."""
-
-DILEMMA3 = """A grandmother in a rural village is seriously ill and needs a
-blood transfusion. Her family and the village elders believe this goes against their spiritual traditions. 
-The nearest hospital is hours away. 
-Her grandchildren, who she raised, depend on her. The village's only doctor must decide what to do.
-
-What should the doctor do? Give a clear recommendation and explain your reasoning."""
-
-# ── Pick which dilemma to run ────────────────────────────────
-DILEMMAS = {
-    1: DILEMMA,
-    2: DILEMMA2,
-    3: DILEMMA3,
-}
-
-try:
-    dilemma_number = int(sys.argv[1])
-    chosen_dilemma = DILEMMAS[dilemma_number]
-except (IndexError, ValueError, KeyError):
-    print("Usage: python3 generate_responses.py <dilemma_number>")
-    print(f"Available dilemmas: {sorted(DILEMMAS.keys())}")
-    sys.exit(1)
-
-OUTPUT_FILE = f"responses_dilemma_{dilemma_number}.json"
+ROOT = Path(__file__).resolve().parent
+DILEMMAS_FILE = ROOT / "data" / "dilemmas.json"
+RESPONSES_DIR = ROOT / "responses"
 
 # ── Varied system prompts for diverse responses ──────────────
 SYSTEM_PROMPTS = [
@@ -80,81 +52,102 @@ SYSTEM_PROMPTS = [
     "You believe that spiritual wellbeing is just as important as physical wellbeing, and that medical decisions must account for both.",
 ]
 
-# ── Generate one response ────────────────────────────────────
-def generate_one_response(dilemma, system_prompt=None):
+
+def load_dilemma(number: int) -> dict:
+    with DILEMMAS_FILE.open() as f:
+        dilemmas = json.load(f)
+    key = str(number)
+    if key not in dilemmas:
+        available = sorted(int(k) for k in dilemmas)
+        raise KeyError(f"Dilemma {number} not found. Available: {available}")
+    return dilemmas[key]
+
+
+def wrap_text(text: str, width: int = WRAP_WIDTH) -> list[str]:
+    """Wrap long lines while preserving short ones and blank lines."""
+    result: list[str] = []
+    for line in text.strip().split("\n"):
+        if len(line) <= width:
+            result.append(line)
+        else:
+            result.extend(
+                textwrap.wrap(line, width=width, break_long_words=False, break_on_hyphens=False)
+                or [""]
+            )
+    return result
+
+
+def generate_one_response(prompt: str, system_prompt: str | None = None) -> str:
     payload = {
         "model": MODEL,
-        "prompt": dilemma,
+        "prompt": prompt,
         "stream": False,
-        "options": {
-            "temperature": TEMPERATURE,
-            "top_p": TOP_P,
-        }
+        "options": {"temperature": TEMPERATURE, "top_p": TOP_P},
     }
     if system_prompt:
         payload["system"] = system_prompt
-    
-    response = requests.post(
-        "http://localhost:11434/api/generate",
-        json=payload
-    )
+    response = requests.post(OLLAMA_URL, json=payload)
     return response.json()["response"]
 
-# ── Main ─────────────────────────────────────────────────────
-print(f"Generating {NUM_RESPONSES} diverse responses...")
-print(f"Model: {MODEL} | Temperature: {TEMPERATURE}")
-print("=" * 60)
 
-responses = []
-
-for i in range(NUM_RESPONSES):
-    sys_prompt = SYSTEM_PROMPTS[i]
-    label = "baseline (no system prompt)" if sys_prompt is None else sys_prompt[:60] + "..."
-    print(f"\nResponse {i+1}/{NUM_RESPONSES} [{label}]")
-    print(f"  Generating...", end=" ", flush=True)
-    start = time.time()
-    
+def main() -> int:
     try:
-        text = generate_one_response(chosen_dilemma, sys_prompt)
-        elapsed = time.time() - start
-        print(f"done ({elapsed:.1f}s)")
-        
-        preview = text.strip()[:120]
-        print(f"  >> {preview}...")
-        
-        wrapped = []
-        for line in text.strip().split('\n'):
-            if len(line) <= 100:
-                wrapped.append(line)
-            else:
-                wrapped.extend(
-                    textwrap.wrap(line, width=100,
-                                 break_long_words=False,
-                                 break_on_hyphens=False) or ['']
-                )
+        dilemma_number = int(sys.argv[1])
+    except (IndexError, ValueError):
+        print("Usage: python3 generate_responses.py <dilemma_number>")
+        return 1
 
-        responses.append({
-            "id": i + 1,
-            "system_prompt": sys_prompt,
-            "response": wrapped
-        })
-        
-    except Exception as e:
+    try:
+        dilemma = load_dilemma(dilemma_number)
+    except (FileNotFoundError, KeyError) as e:
         print(f"ERROR: {e}")
-        print("Is Ollama running? Check your menu bar.")
+        return 1
 
-# ── Save to file ─────────────────────────────────────────────
-output = {
-    "dilemma": chosen_dilemma.strip(),
-    "model": MODEL,
-    "temperature": TEMPERATURE,
-    "num_responses": len(responses),
-    "responses": responses
-}
+    slug = dilemma["slug"]
+    prompt = dilemma["prompt"]
+    output_file = RESPONSES_DIR / f"{slug}.json"
+    RESPONSES_DIR.mkdir(exist_ok=True)
 
-with open(OUTPUT_FILE, "w") as f:
-    json.dump(output, f, indent=2)
+    print(f"Generating {NUM_RESPONSES} diverse responses for: {dilemma.get('title', slug)}")
+    print(f"Model: {MODEL} | Temperature: {TEMPERATURE}")
+    print("=" * 60)
 
-print(f"\n{'=' * 60}")
-print(f"Done! {len(responses)} responses saved to {OUTPUT_FILE}")
-print(f"\nNext: score these with the three ethical judges.")
+    responses = []
+    for i in range(NUM_RESPONSES):
+        sys_prompt = SYSTEM_PROMPTS[i]
+        label = "baseline (no system prompt)" if sys_prompt is None else sys_prompt[:60] + "..."
+        print(f"\nResponse {i+1}/{NUM_RESPONSES} [{label}]")
+        print("  Generating...", end=" ", flush=True)
+        start = time.time()
+
+        try:
+            text = generate_one_response(prompt, sys_prompt)
+            elapsed = time.time() - start
+            print(f"done ({elapsed:.1f}s)")
+            print(f"  >> {text.strip()[:120]}...")
+            responses.append(
+                {"id": i + 1, "system_prompt": sys_prompt, "response": wrap_text(text)}
+            )
+        except Exception as e:
+            print(f"ERROR: {e}")
+            print("  Is Ollama running? Check your menu bar.")
+
+    output = {
+        "dilemma": prompt.strip(),
+        "slug": slug,
+        "model": MODEL,
+        "temperature": TEMPERATURE,
+        "num_responses": len(responses),
+        "responses": responses,
+    }
+    with output_file.open("w") as f:
+        json.dump(output, f, indent=2)
+
+    print(f"\n{'=' * 60}")
+    print(f"Done! {len(responses)} responses saved to {output_file.relative_to(ROOT)}")
+    print("\nNext: score these with the three ethical judges.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

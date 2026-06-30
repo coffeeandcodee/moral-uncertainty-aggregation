@@ -1,50 +1,46 @@
 """
-Score generated responses using three ethical frameworks via GPT-4o-mini.
-Reads responses from a JSON file, scores each one, and outputs results.
+Aggregating Ethics — Stage 2: Score generated responses
+
+Loads a responses file from `responses/`, scores each entry under three
+ethical frameworks via GPT-4o-mini, applies four aggregation rules, and
+writes a JSON + HTML dashboard to `scores/`.
 
 Before running:
-1. pip3 install openai
-2. Set your API key: export OPENAI_API_KEY="sk-your-key-here"
-3. Then: python3 score_responses.py <input_file>
+  1. pip3 install -r requirements.txt
+  2. export OPENAI_API_KEY="sk-..."
+  3. python3 score_responses.py <slug-or-path>
 
-Example: python3 score_responses.py responses_dilemma_3.json
+Examples:
+  python3 score_responses.py grandmother
+  python3 score_responses.py responses/grandmother.json
 """
 
+from __future__ import annotations
+
 import json
-import time
+import os
 import re
 import sys
-import os
+import time
+from pathlib import Path
+from string import Template
 
 try:
     from openai import OpenAI
 except ImportError:
-    print("Run: pip3 install openai")
+    print("Run: pip3 install -r requirements.txt")
     sys.exit(1)
+
+from aggregation import DEFAULT_WEIGHTS, compute_row, pick_winners
 
 # ── Settings ─────────────────────────────────────────────────
 MODEL = "gpt-4o-mini"
-WEIGHTS = [0.4, 0.35, 0.25]
+WEIGHTS = DEFAULT_WEIGHTS
 
-# ── Get input file from command line ─────────────────────────
-try:
-    INPUT_FILE = sys.argv[1]
-except IndexError:
-    print("Usage: python3 score_responses.py <input_file>")
-    print("Example: python3 score_responses.py responses_dilemma_3.json")
-    sys.exit(1)
-
-OUTPUT_FILE = INPUT_FILE.replace("responses_", "scores_")
-OUTPUT_HTML = INPUT_FILE.replace("responses_", "scores_").replace(".json", ".html")
-
-# ── API key ──────────────────────────────────────────────────
-api_key = os.environ.get("OPENAI_API_KEY")
-if not api_key:
-    print("ERROR: Set your API key first:")
-    print('  export OPENAI_API_KEY="sk-your-key-here"')
-    sys.exit(1)
-
-client = OpenAI(api_key=api_key)
+ROOT = Path(__file__).resolve().parent
+RESPONSES_DIR = ROOT / "responses"
+SCORES_DIR = ROOT / "scores"
+TEMPLATE_FILE = ROOT / "templates" / "scores.html"
 
 # ── Judge prompts (strict, full range) ───────────────────────
 FRAMEWORKS = {
@@ -90,148 +86,93 @@ FRAMEWORKS = {
 }
 
 
-def score_response(response_text, framework_prompt):
-    """Send a response to GPT-4o-mini for scoring."""
+def resolve_input(arg: str) -> Path:
+    """Accept either a slug, a bare filename, or a full path."""
+    candidate = Path(arg)
+    if candidate.is_file():
+        return candidate
+    slug_path = RESPONSES_DIR / f"{arg}.json"
+    if slug_path.is_file():
+        return slug_path
+    raise FileNotFoundError(f"Could not find responses file for '{arg}'")
+
+
+def score_response(client: OpenAI, response_text: str, framework_prompt: str) -> int | None:
     try:
         completion = client.chat.completions.create(
             model=MODEL,
             messages=[
                 {"role": "system", "content": framework_prompt},
-                {"role": "user", "content": f"Response to evaluate:\n\n{response_text}"}
+                {"role": "user", "content": f"Response to evaluate:\n\n{response_text}"},
             ],
             temperature=0.1,
             max_tokens=5,
         )
         answer = completion.choices[0].message.content.strip()
-        nums = re.findall(r'\d+', answer)
+        nums = re.findall(r"\d+", answer)
         if nums:
-            val = int(nums[0])
-            return min(max(val, 0), 10)
+            return min(max(int(nums[0]), 0), 10)
     except Exception as e:
         print(f"  scoring error: {e}")
         time.sleep(2)
     return None
 
 
-def generate_html(dilemma, scores):
-    """Generate an HTML visualization of the scores."""
-    rows_js = ",\n  ".join(
-        f"[{s['id']},{s['utilitarian']},{s['deontological']},{s['ubuntu']}]"
-        for s in scores
+def render_html(title: str, rows: list[dict], winners: dict, output_path: Path) -> None:
+    weights_str = (
+        f"Util={WEIGHTS[0]}, Deont={WEIGHTS[1]}, Ubuntu={WEIGHTS[2]}"
     )
-
-    best = {"ec": (0, -1), "max": (0, -1), "nash": (0, -1), "base": (0, -1)}
-    for s in scores:
-        u, d, ub = s["utilitarian"], s["deontological"], s["ubuntu"]
-        ec = round(WEIGHTS[0] * u + WEIGHTS[1] * d + WEIGHTS[2] * ub, 2)
-        mx = min(u, d, ub)
-        na = u * d * ub
-        bl = u
-        if ec > best["ec"][1]:  best["ec"]  = (s["id"], ec)
-        if mx > best["max"][1]: best["max"] = (s["id"], mx)
-        if na > best["nash"][1]: best["nash"] = (s["id"], na)
-        if bl > best["base"][1]: best["base"] = (s["id"], bl)
-
-    highlight_ids = list(set(v[0] for v in best.values()))
-
-    html = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Ethical Scores</title></head><body style="font-family: Arial, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem;">
-
-<h2>Ethical Score Comparison</h2>
-<p style="color: #666;">Each response scored by three ethical judges (0-10), then aggregated four ways</p>
-<p style="color: #666; font-size: 13px;">Judge model: {MODEL} | Weights: Util={WEIGHTS[0]}, Deont={WEIGHTS[1]}, Ubuntu={WEIGHTS[2]}</p>
-
-<table style="width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 1rem;">
-<thead>
-<tr style="border-bottom: 2px solid #ccc;">
-<th style="text-align: left; padding: 8px 6px;">Resp</th>
-<th style="text-align: center; padding: 8px 6px; color: #534AB7;">Utilitarian</th>
-<th style="text-align: center; padding: 8px 6px; color: #185FA5;">Deontological</th>
-<th style="text-align: center; padding: 8px 6px; color: #0F6E56;">Ubuntu</th>
-<th style="text-align: center; padding: 8px 6px; border-left: 2px solid #eee;">EC</th>
-<th style="text-align: center; padding: 8px 6px;">Maximin</th>
-<th style="text-align: center; padding: 8px 6px;">Nash</th>
-<th style="text-align: center; padding: 8px 6px;">Baseline</th>
-</tr>
-</thead>
-<tbody id="tbody"></tbody>
-</table>
-
-<div style="margin-top: 1.5rem; display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;">
-<div id="w-ec" style="background: #f5f5f5; border-radius: 8px; padding: 12px;"><p style="font-size: 11px; color: #888; margin: 0;">Expected choiceworthiness</p><p style="font-size: 18px; font-weight: 500; margin: 4px 0 0;"></p></div>
-<div id="w-max" style="background: #f5f5f5; border-radius: 8px; padding: 12px;"><p style="font-size: 11px; color: #888; margin: 0;">Maximin</p><p style="font-size: 18px; font-weight: 500; margin: 4px 0 0;"></p></div>
-<div id="w-nash" style="background: #f5f5f5; border-radius: 8px; padding: 12px;"><p style="font-size: 11px; color: #888; margin: 0;">Nash parliament</p><p style="font-size: 18px; font-weight: 500; margin: 4px 0 0;"></p></div>
-<div id="w-base" style="background: #f5f5f5; border-radius: 8px; padding: 12px;"><p style="font-size: 11px; color: #888; margin: 0;">Baseline (utilitarian)</p><p style="font-size: 18px; font-weight: 500; margin: 4px 0 0;"></p></div>
-</div>
-
-<p id="verdict" style="margin-top: 1rem; font-size: 14px; padding: 12px; border-radius: 8px; background: #e8f4f8; color: #1a5276;"></p>
-
-<script>
-const scores = [
-  {rows_js}
-];
-const w = [{WEIGHTS[0]}, {WEIGHTS[1]}, {WEIGHTS[2]}];
-
-let bestEC={{id:0,v:-1}}, bestMax={{id:0,v:-1}}, bestNash={{id:0,v:-1}}, bestBase={{id:0,v:-1}};
-const tbody = document.getElementById('tbody');
-
-scores.forEach(([id,r1,r2,r3]) => {{
-  const ec = Math.round((w[0]*r1 + w[1]*r2 + w[2]*r3)*100)/100;
-  const mx = Math.min(r1,r2,r3);
-  const na = r1*r2*r3;
-  const bl = r1;
-  if(ec>bestEC.v){{bestEC={{id,v:ec}}}} if(mx>bestMax.v){{bestMax={{id,v:mx}}}} if(na>bestNash.v){{bestNash={{id,v:na}}}} if(bl>bestBase.v){{bestBase={{id,v:bl}}}}
-
-  const tr = document.createElement('tr');
-  const highlight = [{','.join(str(i) for i in highlight_ids)}].includes(id);
-  tr.style.borderBottom = '0.5px solid #eee';
-  if(highlight) tr.style.background = '#f9f9f9';
-
-  const fmt = (v,col) => {{
-    const isBest = (col==='ec'&&id==={best["ec"][0]})||(col==='max'&&id==={best["max"][0]})||(col==='nash'&&id==={best["nash"][0]})||(col==='base'&&id==={best["base"][0]});
-    return isBest ? `<strong style="color:#1a5276">${{v}}</strong>` : v;
-  }};
-
-  tr.innerHTML = `
-    <td style="padding:6px;font-weight:500">${{id}}</td>
-    <td style="text-align:center;padding:6px;color:#534AB7">${{r1}}</td>
-    <td style="text-align:center;padding:6px;color:#185FA5">${{r2}}</td>
-    <td style="text-align:center;padding:6px;color:#0F6E56">${{r3}}</td>
-    <td style="text-align:center;padding:6px;border-left:2px solid #eee">${{fmt(ec.toFixed(2),'ec')}}</td>
-    <td style="text-align:center;padding:6px">${{fmt(mx,'max')}}</td>
-    <td style="text-align:center;padding:6px">${{fmt(na,'nash')}}</td>
-    <td style="text-align:center;padding:6px">${{fmt(bl,'base')}}</td>
-  `;
-  tbody.appendChild(tr);
-}});
-
-document.querySelector('#w-ec p:last-child').textContent = `Response ${{bestEC.id}} (${{bestEC.v.toFixed(2)}})`;
-document.querySelector('#w-max p:last-child').textContent = `Response ${{bestMax.id}} (${{bestMax.v}})`;
-document.querySelector('#w-nash p:last-child').textContent = `Response ${{bestNash.id}} (${{bestNash.v}})`;
-document.querySelector('#w-base p:last-child').textContent = `Response ${{bestBase.id}} (${{bestBase.v}})`;
-
-const uniqueWinners = new Set([bestEC.id, bestMax.id, bestNash.id, bestBase.id]).size;
-document.getElementById('verdict').textContent = uniqueWinners + ' different response(s) selected across 4 methods — the aggregation choice ' + (uniqueWinners > 1 ? 'changes' : 'does not change') + " the AI's recommendation.";
-</script>
-</body></html>"""
-
-    with open(OUTPUT_HTML, "w") as f:
-        f.write(html)
-    print(f"HTML written to {OUTPUT_HTML}")
+    payload = json.dumps({"rows": rows, "winners": winners})
+    template = Template(TEMPLATE_FILE.read_text())
+    # safe_substitute leaves JS template literals like ${value} untouched
+    # while still filling in our named placeholders.
+    html = template.safe_substitute(
+        title=title,
+        judge_model=MODEL,
+        weights_str=weights_str,
+        data_json=payload,
+    )
+    output_path.write_text(html)
+    print(f"HTML written to {output_path.relative_to(ROOT)}")
 
 
-if __name__ == "__main__":
-    with open(INPUT_FILE) as f:
+def main() -> int:
+    try:
+        arg = sys.argv[1]
+    except IndexError:
+        print("Usage: python3 score_responses.py <slug-or-path>")
+        print("Example: python3 score_responses.py grandmother")
+        return 1
+
+    try:
+        input_file = resolve_input(arg)
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}")
+        return 1
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        print("ERROR: Set your API key first:")
+        print('  export OPENAI_API_KEY="sk-..."')
+        return 1
+    client = OpenAI(api_key=api_key)
+
+    with input_file.open() as f:
         data = json.load(f)
 
-    dilemma = data["dilemma"]
+    slug = data.get("slug") or input_file.stem
+    title = slug.replace("_", " ").title()
     responses = data["responses"]
 
+    SCORES_DIR.mkdir(exist_ok=True)
+    output_json = SCORES_DIR / f"{slug}.json"
+    output_html = SCORES_DIR / f"{slug}.html"
+
     print(f"Scoring {len(responses)} responses with {MODEL}...")
-    print(f"Frameworks: utilitarian, deontological, ubuntu")
+    print("Frameworks: utilitarian, deontological, ubuntu")
     print("=" * 60)
 
-    all_scores = []
+    raw_scores: list[dict] = []
     for resp in responses:
         rid = resp["id"]
         text = resp["response"]
@@ -241,35 +182,44 @@ if __name__ == "__main__":
         row = {"id": rid}
         for name, prompt in FRAMEWORKS.items():
             print(f"  {name}...", end=" ", flush=True)
-            s = score_response(text, prompt)
+            s = score_response(client, text, prompt)
             if s is None:
                 print("FAILED, retrying...", end=" ", flush=True)
                 time.sleep(2)
-                s = score_response(text, prompt)
+                s = score_response(client, text, prompt)
             if s is None:
-                s = 5  # fallback
+                s = 5
                 print(f"FALLBACK {s}")
             else:
                 print(s)
             row[name] = s
-        all_scores.append(row)
+        raw_scores.append(row)
 
-    # Save scores to JSON
+    rows = [compute_row(r, WEIGHTS) for r in raw_scores]
+    winners = pick_winners(rows)
+
     output = {
-        "dilemma": dilemma,
+        "dilemma": data.get("dilemma"),
+        "slug": slug,
         "judge_model": MODEL,
-        "weights": WEIGHTS,
-        "scores": all_scores,
+        "weights": list(WEIGHTS),
+        "scores": raw_scores,
+        "aggregated": rows,
+        "winners": winners,
     }
-    with open(OUTPUT_FILE, "w") as f:
+    with output_json.open("w") as f:
         json.dump(output, f, indent=2)
-    print(f"\nScores saved to {OUTPUT_FILE}")
+    print(f"\nScores saved to {output_json.relative_to(ROOT)}")
 
-    # Print summary
     print(f"\n{'=' * 60}")
     print("Scores:")
-    for s in all_scores:
-        print(f"  R{s['id']:>2}: U={s['utilitarian']} D={s['deontological']} Ub={s['ubuntu']}")
+    for r in raw_scores:
+        print(f"  R{r['id']:>2}: U={r['utilitarian']} D={r['deontological']} Ub={r['ubuntu']}")
 
-    generate_html(dilemma, all_scores)
+    render_html(title, rows, winners, output_html)
     print("Done!")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
